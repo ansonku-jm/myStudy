@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AST2700 ↔ AST1700 I3C 系統架構</title>
+  <style>
+    /* 核心動畫與樣式設定 */
+    .stroke-dasharray-10 { stroke-dasharray: 12, 12; }
+    @keyframes dash { to { stroke-dashoffset: -24; } }
+    @keyframes dash-reverse { to { stroke-dashoffset: 24; } }
+    .animate-dash { animation: dash 1s linear infinite; }
+    .animate-dash-reverse { animation: dash-reverse 1s linear infinite; }
+    
+    /* 資料封包 (Data Packet) 移動動畫 */
+    @keyframes move-data-lr {
+      0% { transform: translate(340px, 222px); opacity: 0; }
+      10% { opacity: 1; }
+      90% { opacity: 1; }
+      100% { transform: translate(644px, 222px); opacity: 0; }
+    }
+    @keyframes move-data-rl {
+      0% { transform: translate(644px, 222px); opacity: 0; }
+      10% { opacity: 1; }
+      90% { opacity: 1; }
+      100% { transform: translate(340px, 222px); opacity: 0; }
+    }
+    .anim-packet-lr { animation: move-data-lr 2s linear infinite; }
+    .anim-packet-rl { animation: move-data-rl 2s linear infinite; }
+
+    /* 確保 SVG path 預設沒有奇怪的 transition 影響動畫 */
+    path { transition: stroke 0.3s ease, stroke-width 0.3s ease; }
+    
+    .block-base {
+      position: absolute;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      border-radius: 0.5rem;
+      border-width: 2px;
+      background-color: #ffffff;
+      transition: all 0.3s ease;
+      box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+    }
+  </style>
+  <!-- 引入 Tailwind CSS 確保樣式正常運作 -->
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-100 font-sans min-h-screen flex flex-col items-center justify-center p-4">
+
+  <div class="w-full max-w-5xl bg-white shadow-xl rounded-2xl overflow-hidden flex flex-col">
+    <!-- Header -->
+    <div class="bg-slate-800 text-white p-6 flex flex-col sm:flex-row justify-between items-center">
+      <div>
+        <h1 class="text-2xl font-bold">AST2700 ↔ AST1700 I3C 系統架構</h1>
+        <p class="text-slate-300 text-sm mt-1">LTPI Bridge & Interrupt Tunnel 展示平台 (純 JS 版)</p>
+      </div>
+      <div class="mt-4 sm:mt-0 flex gap-2">
+        <button id="btn-primary" onclick="startFlow('primary')" class="px-4 py-2 rounded font-semibold transition-colors bg-slate-700 hover:bg-slate-600 text-slate-200">
+          展示 Primary (奇數)
+        </button>
+        <button id="btn-target" onclick="startFlow('target')" class="px-4 py-2 rounded font-semibold transition-colors bg-slate-700 hover:bg-slate-600 text-slate-200">
+          展示 Target (偶數)
+        </button>
+      </div>
+    </div>
+
+    <!-- Diagram Area -->
+    <div class="w-full overflow-x-auto bg-slate-50 relative border-b">
+      <div class="w-[1000px] h-[700px] relative mx-auto" id="diagram-container">
+        
+        <!-- Background Zones -->
+        <div class="absolute left-[40px] top-[40px] w-[340px] h-[480px] bg-blue-50 border-2 border-blue-200 border-dashed rounded-xl"></div>
+        <div class="absolute left-[40px] top-[24px] text-blue-700 font-bold bg-blue-100 px-3 py-1 rounded-t-lg">AST2700 BMC (Host)</div>
+        
+        <div class="absolute left-[620px] top-[40px] w-[340px] h-[480px] bg-green-50 border-2 border-green-200 border-dashed rounded-xl"></div>
+        <div class="absolute left-[620px] top-[24px] text-green-700 font-bold bg-green-100 px-3 py-1 rounded-t-lg">AST1700 I/O Expander</div>
+
+        <!-- LTPI Tunnel Area -->
+        <div class="absolute left-[400px] top-[180px] w-[200px] h-[260px] bg-purple-50/50 border border-purple-200 rounded-xl flex items-center justify-center opacity-50">
+          <span class="text-purple-400 font-bold tracking-widest rotate-90 opacity-50 text-2xl">LTPI 1Gb/s</span>
+        </div>
+
+        <!-- SVG Lines -->
+        <svg class="absolute inset-0 w-full h-full pointer-events-none" id="svg-layer">
+          <defs>
+            <marker id="arrow-idle" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#cbd5e1" />
+            </marker>
+            <marker id="arrow-active" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path id="arrow-active-path" d="M 0 0 L 10 5 L 0 10 z" fill="#3b82f6" />
+            </marker>
+          </defs>
+
+          <!-- AHB Write Paths -->
+          <path id="path-ahb_w_1" d="M 280 140 V 200" fill="none" stroke="#cbd5e1" stroke-width="2" marker-end="url(#arrow-idle)"></path>
+          <path id="path-ahb_ltpi" d="M 340 230 H 660" fill="none" stroke="#cbd5e1" stroke-width="2" marker-end="url(#arrow-idle)"></path>
+          <path id="path-ahb_w_i3c1" d="M 780 230 H 860 V 440" fill="none" stroke="#cbd5e1" stroke-width="2" marker-end="url(#arrow-idle)"></path>
+          <path id="path-ahb_w_i3c0" d="M 720 260 V 440" fill="none" stroke="#cbd5e1" stroke-width="2" marker-end="url(#arrow-idle)"></path>
+
+          <!-- I3C Pad Paths -->
+          <path id="path-i3c_pad_1" d="M 860 500 V 600" fill="none" stroke="#cbd5e1" stroke-width="2" marker-end="url(#arrow-idle)"></path>
+          <path id="path-i3c_pad_0" d="M 720 600 V 500" fill="none" stroke="#cbd5e1" stroke-width="2" marker-end="url(#arrow-idle)"></path>
+
+          <!-- IRQ Paths -->
+          <path id="path-irq_i3c1" d="M 880 440 V 390 H 800" fill="none" stroke="#cbd5e1" stroke-width="2" marker-end="url(#arrow-idle)"></path>
+          <path id="path-irq_i3c0" d="M 780 470 H 840 V 400" fill="none" stroke="#cbd5e1" stroke-width="2" marker-end="url(#arrow-idle)"></path>
+          <path id="path-irq_tunnel" d="M 800 390 H 200" fill="none" stroke="#cbd5e1" stroke-width="2" marker-end="url(#arrow-idle)"></path>
+          <path id="path-irq_rx_gic" d="M 140 360 V 260" fill="none" stroke="#cbd5e1" stroke-width="2" marker-end="url(#arrow-idle)"></path>
+          <path id="path-irq_gic_kernel" d="M 140 200 V 140" fill="none" stroke="#cbd5e1" stroke-width="2" marker-end="url(#arrow-idle)"></path>
+        </svg>
+
+        <!-- DOM Blocks Container (Populated by JS) -->
+        <div id="blocks-layer"></div>
+
+        <!-- 動態資料封包 (Data Packet) -->
+        <div id="data-packet" class="absolute left-0 top-0 w-4 h-4 bg-orange-500 rounded-sm z-20 shadow-md hidden flex items-center justify-center pointer-events-none">
+          <span class="absolute -top-5 text-xs font-bold text-orange-600 bg-white/90 px-1 rounded shadow-sm whitespace-nowrap">Data</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Controls & Descriptions -->
+    <div class="p-6 bg-white flex flex-col items-center text-center">
+      <div id="controls-container" class="flex gap-4 items-center mb-4 h-8 hidden">
+        <span id="step-indicator" class="font-bold text-slate-600 bg-slate-100 px-3 py-1 rounded">步驟 0 / 0</span>
+        
+        <button id="btn-next" onclick="handleNextStep()" class="px-4 py-1 bg-slate-800 hover:bg-slate-700 text-white rounded font-medium shadow">
+          下一步驟
+        </button>
+        
+        <button id="btn-reset" onclick="resetFlow()" class="px-4 py-1 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded font-medium shadow hidden">
+          重置流程
+        </button>
+
+        <button id="btn-autoplay" onclick="togglePlay()" class="px-4 py-1 rounded font-medium shadow border bg-blue-50 text-blue-600 border-blue-200">
+          自動播放
+        </button>
+      </div>
+      
+      <div id="desc-text" class="text-lg font-medium max-w-3xl min-h-[60px] transition-colors duration-500 text-gray-500">
+        請選擇一個控制流程來展示系統訊號走向。
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    // 狀態變數
+    let currentMode = 'idle'; // 'idle', 'primary', 'target'
+    let currentStep = 0;
+    let isPlaying = false;
+    let playTimer = null;
+
+    // 定義節點 (Blocks) 的座標與狀態
+    const blocksData = {
+      kernel: { x: 80, y: 80, w: 260, h: 60, title: "AST2700 Kernel", subtitle: "I3C Driver / Handler" },
+      gic: { x: 80, y: 200, w: 120, h: 60, title: "GIC", subtitle: "Interrupt Controller" },
+      ltpi_m: { x: 220, y: 200, w: 120, h: 60, title: "LTPI Master", subtitle: "AHB Bridge" },
+      ltpi_irq_r: { x: 80, y: 360, w: 120, h: 60, title: "LTPI IRQ Rx", subtitle: "Tunnel Receiver" },
+      ltpi_t: { x: 660, y: 200, w: 120, h: 60, title: "LTPI Target", subtitle: "AHB Bridge" },
+      ltpi_irq_t: { x: 800, y: 360, w: 120, h: 60, title: "LTPI IRQ Tx", subtitle: "Tunnel Transmitter" },
+      i3c0: { x: 660, y: 440, w: 120, h: 60, title: "i3c0 (Target)", subtitle: "Slave Mode" },
+      i3c1: { x: 800, y: 440, w: 120, h: 60, title: "i3c1 (Primary)", subtitle: "Master Mode" },
+      ext_host: { x: 660, y: 600, w: 120, h: 60, title: "外部 Host", subtitle: "I3C Master (CPU)" },
+      ext_dev: { x: 800, y: 600, w: 120, h: 60, title: "外部裝置", subtitle: "DIMM SPD / PMIC" },
+    };
+
+    const pathIds = [
+      'ahb_w_1', 'ahb_ltpi', 'ahb_w_i3c1', 'ahb_w_i3c0', 
+      'i3c_pad_1', 'i3c_pad_0', 
+      'irq_i3c1', 'irq_i3c0', 'irq_tunnel', 'irq_rx_gic', 'irq_gic_kernel'
+    ];
+
+    // 流程步驟定義
+    const flows = {
+      primary: [
+        {
+          step: 1,
+          desc: "AST2700 發起 AHB Write，透過 LTPI 橋接器，下達命令給 AST1700 的 i3c1 控制器。",
+          activeBlocks: ['kernel', 'ltpi_m', 'ltpi_t', 'i3c1'],
+          activePaths: ['ahb_w_1', 'ahb_ltpi', 'ahb_w_i3c1'],
+          color: 'text-blue-600', strokeColor: '#3b82f6'
+        },
+        {
+          step: 2,
+          desc: "AST1700 內部的 i3c1 控制器收到命令後，從實體 Pad 發出 SCL/SDA 訊號，與外部裝置進行 I3C 通訊。",
+          activeBlocks: ['i3c1', 'ext_dev'],
+          activePaths: ['i3c_pad_1'],
+          color: 'text-orange-500', strokeColor: '#f97316'
+        },
+        {
+          step: 3,
+          desc: "通訊完成或有事件，i3c1 產生硬體中斷。中斷透過 LTPI 中斷隧道 (Interrupt Tunnel) 傳回 AST2700 的 GIC，通知 Kernel。",
+          activeBlocks: ['i3c1', 'ltpi_irq_t', 'ltpi_irq_r', 'gic', 'kernel'],
+          activePaths: ['irq_i3c1', 'irq_tunnel', 'irq_rx_gic', 'irq_gic_kernel'],
+          color: 'text-red-500', strokeColor: '#ef4444'
+        },
+        {
+          step: 4,
+          desc: "AST2700 Kernel 收到中斷通知後，主動發起 AHB Read，透過 LTPI 取回 AST1700 i3c1 RX FIFO 內的資料。",
+          activeBlocks: ['kernel', 'ltpi_m', 'ltpi_t', 'i3c1'],
+          activePaths: ['ahb_w_1', 'ahb_ltpi', 'ahb_w_i3c1'],
+          color: 'text-green-500', strokeColor: '#22c55e',
+          reverseAnim: true
+        }
+      ],
+      target: [
+        {
+          step: 1,
+          desc: "外部 Host (I3C Master) 主動發起通訊，將資料傳入 AST1700 的 i3c0 (Slave 模式) 實體 Pad，資料存入 RX FIFO。",
+          activeBlocks: ['ext_host', 'i3c0'],
+          activePaths: ['i3c_pad_0'],
+          color: 'text-orange-500', strokeColor: '#f97316'
+        },
+        {
+          step: 2,
+          desc: "i3c0 接收到資料後產生硬體中斷，透過 LTPI 中斷隧道 (Interrupt Tunnel) 傳回 AST2700 的 GIC，通知 Kernel。",
+          activeBlocks: ['i3c0', 'ltpi_irq_t', 'ltpi_irq_r', 'gic', 'kernel'],
+          activePaths: ['irq_i3c0', 'irq_tunnel', 'irq_rx_gic', 'irq_gic_kernel'],
+          color: 'text-red-500', strokeColor: '#ef4444'
+        },
+        {
+          step: 3,
+          desc: "AST2700 Kernel 收到中斷通知，主動發起 AHB Read，透過 LTPI 取回 AST1700 i3c0 RX FIFO 內的資料。",
+          activeBlocks: ['kernel', 'ltpi_m', 'ltpi_t', 'i3c0'],
+          activePaths: ['ahb_w_1', 'ahb_ltpi', 'ahb_w_i3c0'],
+          color: 'text-green-500', strokeColor: '#22c55e',
+          reverseAnim: true
+        }
+      ]
+    };
+
+    // 初始化渲染 DOM Blocks
+    function initBlocks() {
+      const layer = document.getElementById('blocks-layer');
+      for (const [key, b] of Object.entries(blocksData)) {
+        const div = document.createElement('div');
+        div.id = `block-${key}`;
+        div.className = `block-base border-slate-300 opacity-90`;
+        div.style.left = `${b.x}px`;
+        div.style.top = `${b.y}px`;
+        div.style.width = `${b.w}px`;
+        div.style.height = `${b.h}px`;
+        
+        const titleSpan = document.createElement('span');
+        titleSpan.className = `title font-bold text-slate-700`;
+        titleSpan.innerText = b.title;
+        div.appendChild(titleSpan);
+        
+        if (b.subtitle) {
+          const subSpan = document.createElement('span');
+          subSpan.className = `text-xs text-slate-500 mt-1`;
+          subSpan.innerText = b.subtitle;
+          div.appendChild(subSpan);
+        }
+        
+        layer.appendChild(div);
+      }
+    }
+
+    // 更新 UI 畫面
+    function updateUI() {
+      const config = (currentMode !== 'idle' && currentStep > 0 && currentStep <= flows[currentMode].length)
+        ? flows[currentMode][currentStep - 1]
+        : { activeBlocks: [], activePaths: [], color: 'text-gray-500', strokeColor: '#cbd5e1', desc: '請選擇一個控制流程來展示系統訊號走向。' };
+
+      // 更新說明文字
+      const descEl = document.getElementById('desc-text');
+      descEl.className = `text-lg font-medium max-w-3xl min-h-[60px] transition-colors duration-500 ${config.color}`;
+      descEl.innerText = config.desc;
+
+      // 更新頂部按鈕狀態
+      document.getElementById('btn-primary').className = `px-4 py-2 rounded font-semibold transition-colors ${currentMode === 'primary' ? 'bg-blue-500 text-white' : 'bg-slate-700 hover:bg-slate-600 text-slate-200'}`;
+      document.getElementById('btn-target').className = `px-4 py-2 rounded font-semibold transition-colors ${currentMode === 'target' ? 'bg-orange-500 text-white' : 'bg-slate-700 hover:bg-slate-600 text-slate-200'}`;
+
+      // 更新控制區
+      const controlsContainer = document.getElementById('controls-container');
+      const stepIndicator = document.getElementById('step-indicator');
+      const btnNext = document.getElementById('btn-next');
+      const btnReset = document.getElementById('btn-reset');
+      const btnAutoplay = document.getElementById('btn-autoplay');
+
+      if (currentMode !== 'idle') {
+        controlsContainer.classList.remove('hidden');
+        stepIndicator.innerText = `步驟 ${currentStep} / ${flows[currentMode].length}`;
+        
+        if (currentStep < flows[currentMode].length) {
+          btnNext.classList.remove('hidden');
+          btnReset.classList.add('hidden');
+        } else {
+          btnNext.classList.add('hidden');
+          btnReset.classList.remove('hidden');
+        }
+
+        btnAutoplay.innerText = isPlaying ? '暫停自動播放' : '自動播放';
+        btnAutoplay.className = `px-4 py-1 rounded font-medium shadow border ${isPlaying ? 'bg-red-50 text-red-600 border-red-200' : 'bg-blue-50 text-blue-600 border-blue-200'}`;
+      } else {
+        controlsContainer.classList.add('hidden');
+      }
+
+      // 更新 SVG 動態箭頭顏色
+      document.getElementById('arrow-active-path').setAttribute('fill', config.strokeColor);
+
+      // 處理動態資料封包 (Data Packet) 在 LTPI Data Channel 的顯示與動畫
+      const dataPacket = document.getElementById('data-packet');
+      if (config.activePaths.includes('ahb_ltpi')) {
+        dataPacket.classList.remove('hidden', 'anim-packet-lr', 'anim-packet-rl');
+        // 觸發 reflow 以重啟動畫
+        void dataPacket.offsetWidth; 
+        // 根據 reverseAnim 決定資料流向 (Write 是左到右, Read 是右到左)
+        dataPacket.classList.add(config.reverseAnim ? 'anim-packet-rl' : 'anim-packet-lr');
+      } else {
+        dataPacket.classList.add('hidden');
+        dataPacket.classList.remove('anim-packet-lr', 'anim-packet-rl');
+      }
+
+      // 更新 Blocks
+      for (const key of Object.keys(blocksData)) {
+        const el = document.getElementById(`block-${key}`);
+        const titleEl = el.querySelector('.title');
+        
+        if (config.activeBlocks.includes(key)) {
+          el.style.borderColor = config.strokeColor;
+          el.style.boxShadow = `0 10px 15px -3px ${config.strokeColor}40`;
+          el.classList.add('border-opacity-100', 'shadow-lg', 'scale-105', 'z-10');
+          el.classList.remove('border-slate-300', 'opacity-90');
+          titleEl.classList.replace('text-slate-700', 'text-slate-900');
+        } else {
+          el.style.borderColor = '';
+          el.style.boxShadow = '';
+          el.classList.remove('border-opacity-100', 'shadow-lg', 'scale-105', 'z-10');
+          el.classList.add('border-slate-300', 'opacity-90');
+          titleEl.classList.replace('text-slate-900', 'text-slate-700');
+        }
+      }
+
+      // 更新 Paths
+      for (const id of pathIds) {
+        const pathEl = document.getElementById(`path-${id}`);
+        if (config.activePaths.includes(id)) {
+          pathEl.setAttribute('stroke', config.strokeColor);
+          pathEl.setAttribute('stroke-width', '4');
+          pathEl.setAttribute('marker-end', 'url(#arrow-active)');
+          const animClass = config.reverseAnim ? 'animate-dash-reverse' : 'animate-dash';
+          pathEl.setAttribute('class', `stroke-dasharray-10 ${animClass}`);
+        } else {
+          pathEl.setAttribute('stroke', '#cbd5e1');
+          pathEl.setAttribute('stroke-width', '2');
+          pathEl.setAttribute('marker-end', 'url(#arrow-idle)');
+          pathEl.setAttribute('class', '');
+        }
+      }
+    }
+
+    // 流程控制函數
+    function startFlow(mode) {
+      currentMode = mode;
+      currentStep = 1;
+      isPlaying = false;
+      clearTimeout(playTimer);
+      updateUI();
+    }
+
+    function handleNextStep() {
+      if (currentMode === 'idle') return;
+      const maxSteps = flows[currentMode].length;
+      if (currentStep < maxSteps) {
+        currentStep++;
+        updateUI();
+      } else {
+        resetFlow();
+      }
+    }
+
+    function resetFlow() {
+      currentMode = 'idle';
+      currentStep = 0;
+      isPlaying = false;
+      clearTimeout(playTimer);
+      updateUI();
+    }
+
+    function togglePlay() {
+      isPlaying = !isPlaying;
+      updateUI();
+      manageAutoplay();
+    }
+
+    function manageAutoplay() {
+      clearTimeout(playTimer);
+      if (isPlaying && currentMode !== 'idle') {
+        const maxSteps = flows[currentMode].length;
+        if (currentStep <= maxSteps) {
+          playTimer = setTimeout(() => {
+            handleNextStep();
+            manageAutoplay(); // 遞迴呼叫繼續播放
+          }, 3000);
+        } else {
+          isPlaying = false;
+          updateUI();
+        }
+      }
+    }
+
+    // 頁面載入後初始化
+    window.onload = () => {
+      initBlocks();
+      updateUI();
+    };
+  </script>
+</body>
+</html>
